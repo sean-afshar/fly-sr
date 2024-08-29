@@ -95,7 +95,7 @@ def sample_fixation(
     Returns:
         Tuple[float, float]: A tuple containing the fixation velocity (always 0.0) and the sampled fixation duration.
     """
-    sample_key = jax.random.split(key, 1)
+    sample_key = jax.random.split(key, 1).squeeze()
     return 0.0, tfp.distributions.InverseGaussian(loc=mu_f, concentration=(a_f / eta_f) ** 2).sample(
         seed=sample_key
     )

@@ -2,6 +2,7 @@
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike
+import optax
 import numpy as np
 
 n_pixels = 96  # Number of partitions for angular discretization
@@ -35,18 +36,34 @@ def to_1_hot(theta: ArrayLike, n_partitions: int = 96) -> jax.Array:
     return jax.nn.one_hot((theta % 360) // (360 / n_partitions), n_partitions)
 
 
-def action_pdf(heading: ArrayLike, goal: ArrayLike, phi: ArrayLike, psi: ArrayLike) -> ArrayLike:
-    """Give a probability distribution over
+def contrastive_loss(
+    params: optax.Params,
+    anchor_states: ArrayLike,
+    like_states: ArrayLike,
+    dislike_states: ArrayLike,
+):
+    """Computes contrastive loss between a single anchor, like and dislike states.
+
+    L(s, s+, s-) = E[log(sigmoid(<phi^T s, psi^T s+ >)) + log(1 - sigmoid(<phi^T s,  psi^T s- >))]
 
     Args:
-        action (int): Index corresponding to the action taken (0 for fixations, 1 for left saccades, 2 for right saccades)
-        heading (ArrayLike): 1 hot vector
-        goal (ArrayLike): 1 hot vector
-        phi (ArrayLike): Tensor of shape |A| x D x len(heading/goal)
-        psi (ArrayLike): Tensor of shape D x len(heading/goal)
+        params (optax.Params): Dictionary containing a 'phi' parameter of shape (latent_dim, anchor_dim)
+          and 'psi' parameter of shape (latent_dim, dim)
+        anchor_state (ArrayLike): Array of shape (batch, anchor_dim)
+        like_state (ArrayLike): Array of shape (batch, dim)
+        dislike_state (ArrayLike): Array of shape (batch, dim)
 
     Returns:
-        float: P(action | goal, heading) for each action
+        loss (float): Binary cross entropy loss
     """
-    logits = np.einsum("ijk,k,jl,l->i", phi, heading, psi, goal)
-    return jax.nn.softmax(logits)
+    # <(phi^T s[i]), (psi^T s+[i])>
+    like_logits = jnp.einsum(
+        "ij,kj,il,kl->i", anchor_states, params["phi"], like_states, params["psi"]
+    )  # (batch,)
+    # <(phi^T s[i]), (psi^T s-[i])>
+    dislike_logits = jnp.einsum(
+        "ij,kj,il,kl->i", anchor_states, params["phi"], dislike_states, params["psi"]
+    )  # (batch,)
+    # sigma(-x) = 1 - sigma(x), more numerically stable
+    minibatch_loss = -(jax.nn.log_sigmoid(like_logits) + jax.nn.log_sigmoid(-dislike_logits))  # (batch,)
+    return jnp.mean(minibatch_loss)

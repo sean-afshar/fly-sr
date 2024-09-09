@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from jax import vmap
 from jax.typing import ArrayLike
-from typing import Tuple, Optional, Callable
+from typing import Tuple, Optional, Callable, List
 from tensorflow_probability.substrates import jax as tfp
 
 n_pixels = 96  # Number of partitions for angular discretization
@@ -25,11 +25,11 @@ def sample_action(key: jax.Array, n_actions: Optional[int] = 3, p: Optional[Arra
 
     Args:
       key (jax.Array): The random key used for sampling.
-      n_actions: Size of action space, default 3.
+      n_actions (Optional(int)): Size of action space, default 3.
       p (Optional): Discrete probability over action space, assumed to be uniform.
 
     Returns:
-      action: Index corresponding to element in action space, default 0 for fixation, 1 for left saccade, 2 for right saccade.
+      action (int): Index corresponding to element in action space, default 0 for fixation, 1 for left saccade, 2 for right saccade.
     """
     return jax.random.choice(key, jnp.arange(n_actions), p=p)
 
@@ -178,61 +178,98 @@ def generate_trajectory(
     return trajectory, x_G
 
 
+def sample_like(
+    sample_key: jax.Array, trajectory: ArrayLike, action: int, state_index: int, tau_s: float, tau_f: float
+):
+    """
+    Samples the next state from a trajectory based on the current action and state index.
+
+    Args:
+        sample_key (jax.Array): Random key for sampling.
+        trajectory (ArrayLike): The trajectory from which to sample the next state.
+        action (int): The current action taken.
+        state_index (int): The current index of the state in the trajectory.
+        tau_s (float): Probability parameter for sampling time lag given a saccade.
+        tau_f (float): Probability parameter for sampling time lag given a fixation.
+
+    Returns:
+        Tuple[ArrayLike, int]: A tuple containing the sampled state and its corresponding index.
+    """
+    # Recognize previous action
+    is_fixated = action == 0
+    # Sample time lag
+    time_step = jax.lax.cond(
+        is_fixated,
+        lambda k: jax.random.geometric(k, p=tau_f),
+        lambda k: jax.random.geometric(k, p=tau_s),
+        sample_key,
+    )
+    # Sample next state
+    next_index = jnp.max(jnp.array([len(trajectory) - 1, state_index + time_step]))
+    pair = trajectory[next_index]
+    return pair, next_index
+
+
+def sample_dislike(sample_key: jax.Array, traj_index: int, design_mat: ArrayLike):
+    """
+    Samples a state from the design matrix that is not part of the given trajectory index.
+
+    Args:
+        sample_key (jax.Array): Random key for sampling.
+        traj_index (int): Index of the trajectory to exclude from sampling.
+        design_mat (ArrayLike): Design matrix containing trajectory data, of shape (batch, horizon, ...).
+
+    Returns:
+        Tuple[ArrayLike, int]: A tuple containing the sampled state and its corresponding index.
+    """
+    traj_key, state_key = jax.random.split(sample_key)
+    candidates = jnp.where(jnp.arange(design_mat.shape[0]) != traj_index, size=design_mat.shape[0])[0]
+    traj_index = jax.random.choice(traj_key, candidates)
+    state_index = jax.random.choice(state_key, jnp.arange(design_mat.shape[1]))
+    return design_mat[traj_index, state_index], state_index + (traj_index * design_mat.shape[1])
+
+
 def sample_trajectory(
     key,
     design_mat: ArrayLike,
+    actions: ArrayLike,
     tau_s: int,
     tau_f: int,
-) -> Tuple[Tuple[ArrayLike, ArrayLike], Tuple[ArrayLike, ArrayLike], Tuple[int, int]]:
+) -> Tuple[List[ArrayLike], List[int]]:
     """Samples like and dislike pairs of states from a trajectory.
 
     Args:
         key (jax.Array): Random key for sampling.
-        design_mat (ArrayLike): Design matrix containing trajectory data.
+        design_mat (ArrayLike): Design matrix containing trajectory data, of shape (batch, horizon, ...).
+        actions (ArrayLike): Matrix of actions across trajectory, of shape (batch, horizon, ...)
         tau_s (int): Parameter for sampling time lag during saccades.
         tau_f (int): Parameter for sampling time lag during fixations.
 
     Returns:
-        Tuple of like states (s, s+), tuple of dislike states (s, s-), indices for like and dislike states.
+        Tuple of anchor, like, dislike state (s, s+, s-) and a tuple of corresponding indices.
     """
-
-    def sample_like(sample_key, design_mat, traj_index, state_index, tau_s, tau_f):
-        # Recognize previous action
-        is_fixated = design_mat[traj_index][state_index][1] == 0
-        # Sample time lag
-        time_step = jax.lax.cond(
-            is_fixated,
-            lambda k: jax.random.geometric(k, p=tau_f),
-            lambda k: jax.random.geometric(k, p=tau_s),
-            sample_key,
-        )
-        # Sample next state
-        next_index = jnp.max(jnp.array([len(design_mat[traj_index]) - 1, state_index + time_step]))
-        pair = design_mat[traj_index][next_index]
-        return pair, next_index * (traj_index + 1)
-
-    def sample_dislike(sample_key, traj_index, design_mat):
-        traj_key, state_key = jax.random.split(sample_key)
-        candidates = jnp.arange(design_mat.shape[0])
-        candidates = candidates[candidates != traj_index]
-        traj_index = jax.random.choice(traj_key, candidates)
-        state_index = jax.random.choice(state_key, jnp.arange(design_mat.shape[1]))
-        return design_mat[traj_index][state_index], state_index * (traj_index + 1)
-
     # Sample anchor state
     anchor_key, like_key, dislike_key = jax.random.split(key, 3)
-    anchor_traj_key, anchor_state_key = jax.random.split(anchor_key)
+    anchor_traj_key, anchor_state_key = jax.random.split(anchor_key, 2)
     anchor_traj_index = jax.random.choice(anchor_traj_key, jnp.arange(design_mat.shape[0]))
     anchor_state_index = jax.random.choice(anchor_state_key, jnp.arange(design_mat.shape[1]))
-    anchor_state = design_mat[anchor_traj_index][anchor_state_index]
+    anchor_state = design_mat[anchor_traj_index, anchor_state_index]
     # Sample like / dislike pairs
-    like_state, like_index = sample_like(
-        like_key, anchor_state, anchor_traj_index, anchor_state_index, tau_s, tau_f
+    like_state, like_state_index = sample_like(
+        like_key,
+        design_mat[anchor_traj_index],
+        actions[anchor_traj_index][anchor_state_index],
+        anchor_state_index,
+        tau_s,
+        tau_f,
     )
     dislike_state, dislike_index = sample_dislike(dislike_key, anchor_traj_index, design_mat)
 
     return (
-        (anchor_state, like_state),
-        (anchor_state, dislike_state),
-        (like_index, dislike_index),
+        [anchor_state, like_state, dislike_state],
+        [
+            anchor_state_index + (anchor_traj_index * design_mat.shape[1]),
+            like_state_index + (anchor_traj_index * design_mat.shape[1]),
+            dislike_index,
+        ],
     )

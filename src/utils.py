@@ -3,7 +3,6 @@ import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 import optax
-import numpy as np
 
 n_pixels = 96  # Number of partitions for angular discretization
 
@@ -34,7 +33,7 @@ def to_1_hot(theta: ArrayLike, n_partitions: int = 96) -> jax.Array:
       x: 1 hot vector of shape (n_partitions,)
     """
     return jax.nn.one_hot((theta % 360) // (360 / n_partitions), n_partitions)
-
+  
 
 def contrastive_loss(
     params: optax.Params,

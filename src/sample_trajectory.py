@@ -205,7 +205,8 @@ def sample_like(
         sample_key,
     )
     # Sample next state
-    next_index = jnp.max(jnp.array([len(trajectory) - 1, state_index + time_step]))
+    next_index = jnp.minimum(state_index + time_step, )
+    next_index = jnp.minimum(jnp.array([len(trajectory) - 1, state_index + time_step]))
     pair = trajectory[next_index]
     return pair, next_index
 
@@ -220,6 +221,7 @@ def sample_dislike(sample_key: jax.Array, traj_index: int, design_mat: ArrayLike
         design_mat (ArrayLike): Design matrix containing trajectory data, of shape (batch, horizon, ...).
 
     Returns:
+        
         Tuple[ArrayLike, int]: A tuple containing the sampled state and its corresponding index.
     """
     traj_key, state_key = jax.random.split(sample_key)
